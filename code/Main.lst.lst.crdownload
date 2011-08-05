@@ -1,0 +1,1783 @@
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE  1
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00001 ;********************************************************************
+                      00002 ;Filename:      Main.asm                                                                                
+                                            *
+                      00003 ;PCB:   Model 13 Version 5-4e                                                                           
+                            *
+                      00004 ;Date:  20080726        start development                                                               
+                            *
+                      00005 ;Date:  20090326        first controlled temp                                                   *
+                      00006 ;Date:  20090404        1°F stability observed                                                  *
+                      00007 ;Date:  20100320        modified PID(DCBIAS) - 1°F stability achieved   *
+                      00008 ;PCB:   Model 14 Version 1                                                                              
+                                    *
+                      00009 ;PCB:   Model 14 Version 2d             11/18/2010                                                      
+                            *
+                      00010 ;PCB:   Model 14 Version 3               2/12/2011                                                      
+                            *
+                      00011 ;Date:  20110228        new integer PID(DCBIAS) - best stability                *
+                      00012 ;Date:  20110307        really sustained stability                                              *
+                      00013 ;********************************************************************
+                      00014 
+                      00015         errorlevel      -302
+                      00016         errorlevel      -305
+                      00017         expand
+                      00018 
+                      00019         list            p=12F683                ;list directive to define processor
+                      00020 
+                      00021         #include        p12F683.inc             ;processor specific EQUs
+                      00001                 LIST
+                      00002 ; P12F683.INC  Standard Header File, Version 1.00       Microchip Technology, Inc.
+                      00348                 LIST
+                      00022         #include        Vars.asm
+                      00001 ;***** VARIABLE DEFINITIONS
+                      00002 
+                      00003         #define LED             GPIO,0          ;OUT:   GREEN LED
+                      00004         #define BTN             GPIO,1          ;IN:    3 button array
+                      00005         #define PWM             GPIO,2          ;OUT:   control current to coil
+                      00006         #define SDATA   GPIO,3          ;IN:    MAX6675 serial data     (MCLR)
+                      00007         #define CS              GPIO,4          ;OUT:   MAX6675 chip select
+                      00008         #define SCLK    GPIO,5          ;OUT:   MAX6675 serial clock
+                      00009 
+                      00010         #define CARRY   STATUS,C        ;carry bit
+                      00011         #define ZERO    STATUS,Z        ;zero bit
+                      00012 
+                      00013         #define cADCset         b'00010010'     ;Fosc/8 = b'-001----', AN1= b'------1-'
+                      00014         #define cADCctrl        b'10000101'     ;right justify, Vdd, AN1, Enabled
+                      00015 
+                      00016         #define PWM_Active_HI b'00001100'       ;110x PWM mode active hi
+                      00017 
+                      00018 ;       97.119 msec = 16984 = 0x4258
+                      00019         #define cHeartbeatLO    0x58    ;               TMR1L
+                      00020         #define cHeartbeatHI    0x42    ;16984  TMR1H = 97.119 ms
+                      00021 
+                      00022         ;7.5 min = 4500 ticks = 0x1194
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE  2
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00023         #define cRUNTIMElo              0x94
+                      00024         #define cRUNTIMEhi              0x11
+                      00025 
+                      00026         ;3.5 min = 2100 ticks = 0x0834  
+                      00027         #define cEXTRATIMElo    0x34
+                      00028         #define cEXTRATIMEhi    0x08
+                      00029 
+                      00030         ; 1 min = 600 ticks = 0x0258
+                      00031         ;30 sec = 300 ticks = 0x012C
+                      00032         ;15 sec = 150 ticks = 0x0096
+                      00033         ; 1 sec =  10 ticks = 0x000A
+                      00034         #define cTOKEITlo               0x0A
+                      00035         #define cTOKEIThi               0x00
+                      00036 
+                      00037         #define cBUTTONinc              0x13    ;18.35 = 5°F * 3.67
+                      00038         #define cBUTTONdec              0x0F    ;14.68 = 4°F * 3.67
+                      00039 
+                      00040         #define cBTNdelay               0x0A    ;10. = 1 second
+                      00041 
+                      00042 ;===== Temperature Control Parameters =====
+                      00043 ;MAX6675 value  = degrees F * 4.02 (M14V2U3)
+                      00044 ;MAX6675 value  = degrees F * 3.67 (M14V2U4)
+                      00045 
+                      00046         #define cSPMINlo        0xDE    ;SETPOINTmin
+                      00047         #define cSPMINhi        0x02    ;= 734. / 3.67 = 200°F
+                      00048 
+                      00049         #define cSPMAXlo        0x2B    ;SETPOINTmax 
+                      00050         #define cSPMAXhi        0x07    ;= 1835. / 3.67 = 500°F
+                      00051 
+                      00052         #define cCTMAXlo        0xE2    ;COILTEMPmax
+                      00053         #define cCTMAXhi        0x07    ;=2018. / 3.67 = 550°F 
+                      00054 
+                      00055         #define cCHANGEmax      0xC0    ;192/3.67 =     52°F (per sample)
+                      00056 
+                      00057 ;===== Duty Cycle Control Parameters =====
+                      00058 ;duty cycle is 0 to 1023 (0% to 100%) b'11 1111 1111' = 0x03FF
+                      00059         #define cDCMAXlo        0xFF    ;maximum duty cycle value
+                      00060         #define cDCMAXhi        0x03
+                      00061 
+                      00062         #define aERRORmax       0x40    ;17°F above - go DCzero
+                      00063         #define bERRORmax       0x40    ;17°F below - go DCmax
+                      00064 
+                      00065         ;vAbove:        gains - decrement if greater
+                      00066         #define aPgain          .6              ;(P)ID  dec
+                      00067         #define aIgain          .2              ;P(I)D  dec
+                      00068         #define aDgainInc       .8              ;PI(D)  dec
+                      00069         #define aDgainDec       .4              ;PI(D)  inc
+                      00070 
+                      00071         ;vBelow:        gains - increment if greater
+                      00072         #define bPgain          .3              ;(P)ID  inc
+                      00073         #define bIgain          .2              ;P(I)D  inc
+                      00074         #define bDgainInc       .8              ;PI(D)  inc
+                      00075         #define bDgainDec       .4              ;PI(D)  dec
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE  3
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00076 
+                      00077         #define cDCBIASminlo    0x20    ;minimum bias value
+                      00078         #define cDCBIASminhi    0x00
+                      00079 
+                      00080         #define cDCBIASmaxlo    0x80    ;maximum bias value
+                      00081         #define cDCBIASmaxhi    0x00
+                      00082 
+                      00083 ;===== Minimum BUTTON Values =====
+                      00084 ;Btn1:  +5      2/(1+2)         2/3 * 1024      = 682   = $02AA
+                      00085 ;Btn2:  -4      2/(1+1+2)       1/2 * 1024      = 512   = $0200
+                      00086 
+                      00087         #define cBTN1minlo      0x6C    ;0C     =620. = 2/3 * 1023 - 10%
+                      00088         #define cBTN1minhi      0x02    ;0D
+                      00089         #define cBTN2minlo      0xD1    ;0E     =465. = 1/2 * 1023 - 10%
+                      00090         #define cBTN2minhi      0x01    ;0F
+                      00091 ;========================================
+                      00092 
+                      00093         #define cLEDONticks             0x02
+                      00094         #define cLEDOFFticks    0x02
+                      00095         #define cLEDONerror             0x02            ;1/2 degree F (3.67 = 1°F)
+                      00096 
+                      00097         #define cWDT5min_pre    b'00010111'     ;1:65536 (WDTCON)
+                      00098         #define cWDT5min_post   b'00001111'     ;1:128 (OPTION_REG)
+                      00099 ;       #define cWDT5min_post   b'00000011'     ;1:32 (OPTION_REG)
+                      00100         #define cWDT256ms_post  b'00001100'
+                      00101 
+                      00102 ;*********************************
+                      00103 ;***** data registers:  $20 .. $2F
+                      00104 ;*********************************
+0020                  00105         ORG     0x0020
+                      00106 
+                      00107 ;----- Coil Temperature buffer ---- 8 values
+                      00108 ;store lo-byte, followed by hi-byte
+  00000020            00109 COILTEMP                EQU     0x20            ;.. 0x2F
+  0002                00110         constant vNoSensor=2            ;bit set if sensor missing
+  0020                00111         constant cCOILTEMPstart=0x20
+  002F                00112         constant cCOILTEMPend=0x2F
+  0010                00113         constant cCOILTEMPbytes=0x10
+                      00114 
+                      00115 ;*********************************
+                      00116 ;***** data registers:  $30 .. $6F
+                      00117 ;*********************************
+                      00118 
+                      00119 ;----- temperature vars -----
+0030                  00120         ORG     0x0030
+  00000030            00121 SETPOINT                EQU     0x30    ;0x30..0x31 temperature set point
+                      00122 ;SETPOINT+1             EQU 0x31
+  0030                00123         constant cSETPOINTadr=0x30
+  00000032            00124 SPERROR                 EQU 0x32        ;lo(setpoint error)
+  0032                00125         constant cSPERRORadr=0x32
+                      00126 ;SPERROR+1              EQU     0x33    ;hi(setpoint error)
+  00000034            00127 SPERRORsum              EQU 0x34        ;total SPERROR since last SETPOINT
+                      00128 ;SPERRORsum+1   EQU 0x35
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE  4
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+  00000036            00129 SPERROR2                EQU 0x36        ;previous SPERROR
+                      00130 ;SPERROR2+1             EQU 0x37        ;previous SPERROR
+  00000038            00131 SPERRORchg              EQU     0X38    ;SPERROR - <previous SPERROR>
+  00000039            00132 SPERRORchg2             EQU     0X39    ;previous SPERRORchg
+  0000003A            00133 CHANGEmax               EQU     0x3A    ;max SPERRORchg with DCMAX
+  0000003B            00134 SPERRORtrip             EQU     0x3B
+                      00135 ;SPERRORtrip+1  EQU     0X3C
+  003B                00136         constant cSPERRORtripadr=0x3B
+                      00137 
+                      00138 ;monitor SPERROR swing for 5 seconds
+  0000003D            00139 SPERRORcnt              EQU     0x3D;count down to reset SPERRORabove, SPERRORbelow
+  000F                00140         constant cSPERRORcnt=0x0F       ;=15 readings =5 seconds (3 per sec)
+  0000003E            00141 SPERRORabove    EQU     0X3E    ;largest SPERROR above SETPOINT
+  0000003F            00142 SPERRORbelow    EQU     0X3F    ;largest SPERROR below SETPOINT
+                      00143 
+                      00144 ;----- duty cycle vars -----
+0040                  00145         ORG     0x0040
+  00000040            00146 DUTYCYCLEsp             EQU     0x40
+                      00147 ;DUTYCYCLEsp+1  EQU     0x41
+  0040                00148         constant cDUTYCYCLEsp=0x40
+  00000042            00149 DUTYCYCLEnew    EQU     0x42
+                      00150 ;DUTYCYCLEnew+1 EQU     0x43
+  0042                00151         constant cDUTYCYCLEnew=0x42
+  00000044            00152 DCBIAS                  EQU     0x44    ;neutral duty cycle (lo)
+                      00153 ;DCBIAS+1               EQU     0x45    ;neutral duty cycle (hi)
+  0044                00154         constant cDCBIASadr=0x44
+  00000046            00155 BTNVALUE                EQU     0x46    ;lo value from AtoD reading
+                      00156 ;BTNVALUE+1             EQU     0x47    ;hi value from AtoD reading
+  0046                00157         constant cBTNVALUEadr=0x46
+                      00158 ;free                   EQU     0x48
+                      00159 ;free                   EQU     0x49
+                      00160 ;free                   EQU     0x4A
+                      00161 ;free                   EQU     0x4B
+                      00162 ;free                   EQU     0x4C
+                      00163 ;free                   EQU     0x4D
+                      00164 ;free                   EQU     0x4E
+                      00165 ;free                   EQU     0x4F
+                      00166 
+                      00167 ;----- counters -----
+0050                  00168         ORG     0x0050
+  00000050            00169 RUNTIME                 EQU     0x50    ;ticks until shutdown
+                      00170 ;RUNTIME+1              EQU     0x51
+  00000052            00171 FLASHdelay0             EQU 0x52        ;delay between flash patterns   
+  00000053            00172 FLASHcount0             EQU     0x53    ;number of flashes in pattern
+  00000054            00173 LEDcnt                  EQU     0x54    ;ticks remaining for this LED state
+  00000055            00174 FLASHcnt                EQU     0x55    ;number of LED on/off sequences
+  00000056            00175 TOKEITdelay             EQU     0x56    ;count 30 seconds of ~vBelow
+                      00176 ;TOKEITdelay+1  EQU     0x57
+  00000058            00177 BTNcount                EQU     0x58    ;count ticks same button held
+                      00178 ;free                   EQU     0x59
+                      00179 ;free                   EQU     0x5A
+                      00180 ;free                   EQU     0x5B
+                      00181 ;free                   EQU     0x5C
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE  5
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00182 ;free                   EQU     0x5D
+  0000005E            00183 TEMPVAR                 EQU     0x5E
+                      00184 ;TEMPVAR+1              EQU     0x5F
+                      00185 
+                      00186 ;----- eePROM read/write -----
+0060                  00187         ORG     0x0060
+  00000060            00188 eeCOILTEMPptr   EQU     0x60    ;pointer to buffer of MAX6675 reading
+  00000061            00189 eeDUTYCYCLEptr  EQU     0x61    ;pointer to buffer of DUTYCYCLEsp values
+  00000062            00190 eeFrom                  EQU     0x62
+  00000063            00191 eeTo                    EQU     0x63
+  00000064            00192 eeCnt                   EQU     0x64
+  00000065            00193 eeByte                  EQU     0x65
+                      00194 ;free                   EQU     0x66..0x6F
+                      00195 
+                      00196 ;*********************************
+                      00197 ;0x70..0x7F (0xF0..0xFF) mapped in both banks
+                      00198 ;*********************************
+0070                  00199         ORG     0x0070
+  00000070            00200 vSTATE                  EQU     0x70    ;vaporizer state
+  0070                00201         constant        cvSTATEadr=0x70
+  0000                00202         constant vTick=0                ;set on Heartbeat interrupt
+  0001                00203         constant vWait=1                ;wait for BTN idle
+  0002                00204         constant vRun=2
+  0003                00205         constant vLEDact=3              ;LED is ACTIVE (1)
+  0004                00206         constant vLEDon=4               ;LED is ON (set) / OFF (clear)
+                      00207 ;       constant ******=5               ;free
+                      00208 ;       constant ******=6               ;free
+  0007                00209         constant vError=7
+                      00210 
+  00000071            00211 vSENSOR                 EQU     0x71    ;sensor state
+  0000                00212         constant vBtnON=0               ;Button press active
+  0001                00213         constant vBtn1=1                ;Button1 = +5, RESET
+  0002                00214         constant vBtn2=2                ;Button2 = -4, START
+                      00215 ;       constant ******=3               ;free
+                      00216 ;       constant ******=4               ;free
+                      00217 ;       constant ******=5               ;free
+  0006                00218         constant vBtn=6                 ;Button (AtoD) reading ready
+  0007                00219         constant vTypeK=7               ;K-Thermocouple reading ready
+                      00220 
+  00000072            00221 vCOILTEMP               EQU     0x72    ;coil temperature state
+  0000                00222         constant vAbove=0               ;COILTEMP is above SETPOINT
+  0001                00223         constant vBelow=1               ;COILTEMP is below SETPOINT
+  0002                00224         constant vInc=2                 ;positive slope = temp increasing
+  0003                00225         constant vDec=3                 ;negative slope = temp decreasing
+  0004                00226         constant vAccel=4               ;temp change increasing
+  0005                00227         constant vDecel=5               ;temp change decreasing
+  0006                00228         constant vChgMax=6              ;COILTEMPchg at max value
+                      00229 ;       constant ******=7               ;free
+                      00230 
+  00000073            00231 vPWM                    EQU     0x73    ;pulse width modulator state
+  0000                00232         constant vPWMon=0               ;PWM is active
+  0001                00233         constant vDCmax=1               ;Duty Cycle is max allowed value
+  0002                00234         constant vDCzero=2              ;Duty Cycle at zero
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE  6
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+  0003                00235         constant vDCsp=3                ;Duty Cycle at setpoint value
+                      00236 ;       constant ******=4               ;free
+                      00237 ;       constant ******=5               ;free
+  0006                00238         constant vDCsign=6              ;Duty Cycle adjustment flag
+  0007                00239         constant vDCnew=7               ;new Duty Cycle value ready
+                      00240 
+  00000074            00241 vERROR                  EQU     0x74
+  0074                00242         constant cvERRORadr=0x74
+  0000                00243         constant vWDT=0                 ;WatchDog timer expired
+  0001                00244         constant vZeroR=1               ;zero reading from MAX
+  0002                00245         constant vTooHot=2              ;maximum temperature exceeded
+  0003                00246         constant vRuntime=3             ;maximum runtime exceeded
+  0004                00247         constant vBattery=4             ;battery dead
+                      00248 ;       constant ******=5               ;free
+                      00249 ;       constant ******=6               ;free
+                      00250 ;       constant vTypeK=7               ;K-Thermocouple missing
+                      00251 
+  00000075            00252 vCOILTEMPold    EQU     0x75    ;previous COILTEMP status
+  00000076            00253 vSENSORold              EQU 0x76        ;previous tick sensor reading
+  00000077            00254 COILTEMPptr             EQU     0x77    ;pointer to most recent coil temperature value
+                      00255 ;free                   EQU     0x78
+                      00256 ;free                   EQU     0x79
+  0000007A            00257 LOOPcnt                 EQU     0x7A    ;loop counter (ReadCOILTEMP)
+  0000007B            00258 BTNdelay                EQU     0x7B    ;20 ticks (2 seconds)
+  0000007C            00259 FLASHdelay              EQU     0x7C    ;ticks until LED flashes start
+  0000007D            00260 COILTEMPdelay   EQU     0x7D    ;ticks until next temp reading (0..3)
+                      00261 
+  0000007E            00262 STATUS_save             EQU     0x7E    ;push STATUS
+  0000007F            00263 W_save                  EQU     0x7F    ;push W 
+                      00264 
+                      00265 ;*********************************
+                      00266 ;***** data registers:  $A0 .. $BF
+                      00267 ;*********************************
+                      00268 ;       ORG     0x00A0
+                      00269 ;       ORG     0x00B0
+                      00270 
+                      00271 ;*********************************
+                      00272 ;***** EEPROM memory:   $00 .. $FF
+                      00273 ;*********************************
+2100                  00274         ORG     0x2100
+                      00275 ;reserve first 16 bytes
+                      00276 
+                      00277 ;m14v2unit3:
+                      00278 ;0x060C = 1548. == 385F == 4.02 (measured)
+                      00279 ;temp(F) * 4.02 = MAXunits
+                      00280 ;400F = 0x0648
+                      00281 
+                      00282 ;m14v2unit4:
+                      00283 ;0x0648 = 1608. == 438°F == 3.67 (measured)
+                      00284 ;temp(°F) * 3.67 = MAXunits
+                      00285 ;400°F = 1468. = 0x05BC
+                      00286 ;380°F = 1468. = 0x05BC 3.86
+                      00287 
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE  7
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00288 ;m14v3unit1:
+                      00289 
+                      00290 ;0x05A0 / 0x0048
+                      00291 ;0x05C0 / 0x004D
+                      00292 
+2100   00EA           00293 eeSETPOINT              de      0xEA    ;00: (lo) desired 12-bit value from sensor
+2101   0005           00294                                 de      0x05    ;01: (hi) 395°F
+  0000                00295         constant ceeSETPOINT=0x00
+                      00296 
+2102   0048           00297 eeDCBIAS                de      0x48    ;02: (lo) DCBIAS
+2103   0000           00298                                 de      0x00    ;03: (hi)
+  0002                00299         constant ceeDCBIASadr=0x02
+                      00300 
+2104   0024           00301 eeSPERRORtrip   de      0x24    ;04:  SPERROR < 80°F
+2105   0001           00302                                 de      0x01    ;05
+  0004                00303         constant ceeSPERRORtripadr=0x04
+                      00304 
+2106   0000 0000      00305                                 de      0x00, 0x00      ;06, 07
+2108   0000 0000      00306                                 de      0x00, 0x00      ;08, 09
+210A   0000 0000      00307                                 de      0x00, 0x00      ;0A, 0B
+210C   0000 0000      00308                                 de      0x00, 0x00      ;0C, 0D
+210E   0000 00FF      00309                                 de      0x00, 0xFF      ;0E, 0F
+  000F                00310         constant ceevERRORadr=0x0F
+                      00311 
+                      00312 ;DEBUG***** block of loop counters
+                      00313 ;eeCounter1             de      0x00    ;0C     loop counter
+                      00314 ;       constant ceeCounter1=0x0C
+                      00315 ;eeCounter2             de      0x00    ;0D     loop counter
+                      00316 ;       constant ceeCounter2=0x0D
+                      00317 ;eeCounter3             de      0x00    ;0E     loop counter
+                      00318 ;       constant ceeCounter3=0x0E
+                      00319 ;eeCounter4             de      0x00    ;0F     loop counter
+                      00320 ;       constant ceeCounter4=0x0F
+                      00321 
+2110                  00322         ORG 0x2110
+                      00323 ;112 bytes = 56 temperature readings
+                      00324 ;@ 3 readings per second = 18 seconds + 2 readings
+2110                  00325 eeCOILTEMP      ;0x10..0x7F (112 bytes)
+2110   0000 0000 0000 00326                         de      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+       0000 0000 0000 
+       0000 0000 0000 
+       0000 0000 0000 
+       0000 0000 0000 
+       0000 
+2120   0000 0000 0000 00327                         de      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+       0000 0000 0000 
+       0000 0000 0000 
+       0000 0000 0000 
+       0000 0000 0000 
+       0000 
+2130   0000 0000 0000 00328                         de      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+       0000 0000 0000 
+       0000 0000 0000 
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE  8
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+       0000 0000 0000 
+       0000 0000 0000 
+       0000 
+2140   0000 0000 0000 00329                         de      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+       0000 0000 0000 
+       0000 0000 0000 
+       0000 0000 0000 
+       0000 0000 0000 
+       0000 
+2150   0000 0000 0000 00330                         de      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+       0000 0000 0000 
+       0000 0000 0000 
+       0000 0000 0000 
+       0000 0000 0000 
+       0000 
+2160   0000 0000 0000 00331                         de      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+       0000 0000 0000 
+       0000 0000 0000 
+       0000 0000 0000 
+       0000 0000 0000 
+       0000 
+2170   0000 0000 0000 00332                         de      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+       0000 0000 0000 
+       0000 0000 0000 
+       0000 0000 0000 
+       0000 0000 0000 
+       0000 
+  0010                00333         constant eeCOILTEMPfirst=0x10
+  0080                00334         constant eeCOILTEMPwrap=b'10000000'             ;wrap if bit non-zero
+  007F                00335         constant eeCOILTEMPlast=0x7F
+  006F                00336         constant eeCTBUFbytes=0x6F
+                      00337 
+2180                  00338         ORG     0x2180
+                      00339 ;sync with eeCOILTEMP buffer
+                      00340 
+                      00341 ;factory settings - reset via button sequence: 
+                      00342 ;       BTN1 (2 seconds) only before start
+                      00343 
+  0010                00344         constant ceeFACTORYbytes=0x10                   ;= 16.
+                      00345 
+2180   00C0           00346 eeFACTORYsp             de      0xC0    ;80
+2181   0005           00347                                 de      0x05    ;81             395°F
+  0080                00348         constant ceeFACTORYsp=0x80
+                      00349 
+2182   0050           00350 eeFACTORYbias   de      0x50    ;82
+2183   0000           00351                                 de      0x00    ;83
+  0082                00352         constant ceeFACTORYbias=0x82
+                      00353 
+2184   0024           00354 eeFACTORYtrip   de      0x24    ;84
+2185   0001           00355                                 de      0x01    ;85
+  0084                00356         constant ceeFACTORYtrip=0x84
+                      00357 
+2186   0000 0000      00358                                 de      0x00, 0x00      ;06, 07
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE  9
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+2188   0000 0000      00359                                 de      0x00, 0x00      ;08, 09
+218A   0000 0000      00360                                 de      0x00, 0x00      ;0A, 0B
+218C   0000 0000      00361                                 de      0x00, 0x00      ;0C, 0D
+218E   0000 0000      00362                                 de      0x00, 0x00      ;0E, 0F
+                      00363 
+2190                  00364         ORG     0x2190
+                      00365 ;112 bytes = 56 DUTYCYCLE values
+2190                  00366 eeDUTYCYCLE     ;0x90..0xFF (112 bytes)
+2190   00FF 00FF 00FF 00367                         de      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 
+                            0xFF, 0xFF, 0xFF, 0xFF
+       00FF 00FF 00FF 
+       00FF 00FF 00FF 
+       00FF 00FF 00FF 
+       00FF 00FF 00FF 
+       00FF 
+21A0   00FF 00FF 00FF 00368                         de      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 
+                            0xFF, 0xFF, 0xFF, 0xFF
+       00FF 00FF 00FF 
+       00FF 00FF 00FF 
+       00FF 00FF 00FF 
+       00FF 00FF 00FF 
+       00FF 
+21B0   00FF 00FF 00FF 00369                         de      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 
+                            0xFF, 0xFF, 0xFF, 0xFF
+       00FF 00FF 00FF 
+       00FF 00FF 00FF 
+       00FF 00FF 00FF 
+       00FF 00FF 00FF 
+       00FF 
+21C0   00FF 00FF 00FF 00370                         de      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 
+                            0xFF, 0xFF, 0xFF, 0xFF
+       00FF 00FF 00FF 
+       00FF 00FF 00FF 
+       00FF 00FF 00FF 
+       00FF 00FF 00FF 
+       00FF 
+21D0   00FF 00FF 00FF 00371                         de      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 
+                            0xFF, 0xFF, 0xFF, 0xFF
+       00FF 00FF 00FF 
+       00FF 00FF 00FF 
+       00FF 00FF 00FF 
+       00FF 00FF 00FF 
+       00FF 
+21E0   00FF 00FF 00FF 00372                         de      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 
+                            0xFF, 0xFF, 0xFF, 0xFF
+       00FF 00FF 00FF 
+       00FF 00FF 00FF 
+       00FF 00FF 00FF 
+       00FF 00FF 00FF 
+       00FF 
+21F0   00FF 00FF 00FF 00373                         de      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 
+                            0xFF, 0xFF, 0xFF, 0xFF
+       00FF 00FF 00FF 
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE 10
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+       00FF 00FF 00FF 
+       00FF 00FF 00FF 
+       00FF 00FF 00FF 
+       00FF 
+  0090                00374         constant eeDUTYCYCLEfirst=0x90
+  0080                00375         constant eeDUTYCYCLEwrap=b'10000000'    ;wrap if bit zero
+  00FF                00376         constant eeDUTYCYCLElast=0xFF
+  006F                00377         constant eeDCBUFbytes=0x6F
+                      00378 
+                      00379 ;end    *****
+                      00023         #include        Macro.asm
+                      00001 ;Macro Definitions
+                      00002 
+                      00003 ;Skip_If_ZERO Skip_If_NOT_ZERO
+                      00004 ;Set_CARRY Clear_CARRY Skip_If_CARRY_SET Skip_If_CARRY_CLR
+                      00005 ;Skip_If_vRestart Skip_If_NOT_vRestart
+                      00006 ;Set_vAbove Clear_vAbove Skip_If_vAbove Skip_If_NOT_vAbove Skip_If_Old_vAbove Skip_If_Old_NOT_vAbove
+                      00007 ;Set_vBelow Clear_vBelow Skip_If_vBelow Skip_If_NOT_vBelow Skip_If_Old_vBelow Skip_If_Old_NOT_vBelow
+                      00008 ;Set_vInc Clear_vInc Skip_If_vInc Skip_If_Old_vInc Skip_If_NOT_vInc
+                      00009 ;Set_vDec Clear_vDec Skip_If_vDec Skip_If_Old_vDec Skip_If_NOT_vDec
+                      00010 ;Set_vAccel Clear_vAccel Skip_If_vAccel Skip_If_Old_vAccel Skip_If_NOT_vAccel
+                      00011 ;Set_vDecel Clear_vDecel Skip_If_vDecel Skip_If_Old_vDecel
+                      00012 ;Set_vChgMax Clear_vChgMax Skip_If_vChgMax Skip_If_NOT_vChgMax
+                      00013 ;Clear_vTypeK Skip_If_vTypeK Skip_If_NOT_vTypeK
+                      00014 ;Set_BUTTON1 Clear_BUTTON1 Skip_If_BUTTON1 
+                      00015 ;Set_BUTTON2 Clear_BUTTON2 Skip_If_BUTTON2
+                      00016 ;Set_BUTTON_PRESS Clear_BUTTON_PRESS
+                      00017 ;Set_vDCnew Clear_vDCnew Skip_If_vDCnew
+                      00018 ;Set_vDCzero Clear_vDCzero Skip_If_vDCzero Skip_If_NOT_vDCzero
+                      00019 ;Set_vDCmax Clear_vDCmax Skip_If_vDCmax Skip_If_NOT_vDCmax
+                      00020 ;Set_vDCsp Clear_vDCsp
+                      00021 ;Set_vDCsign Clear_vDCsign Skip_If_vDCsign Skip_If_NOT_vDCsign
+                      00022 
+                      00023 ;       Clear_Bytes (address, count)
+                      00024 ;       Clear_Counter (counter_num)
+                      00025 ;       Increment_Counter (counter_num)
+                      00026 ;       Disable_Interrupts
+                      00027 ;       Enable_Interrupts
+                      00028 ;       Disable_GPIO
+                      00029 ;       Initialize_GPIO
+                      00030 ;       Enable_LED
+                      00031 ;       Initialize_Oscillator
+                      00032 ;       Disable_PWM
+                      00033 ;       Initialize_PWM
+                      00034 ;       Initialize_PID
+                      00035 ;       Initialize_eeDUTYCYCLEptr
+                      00036 ;       Advance_eeDUTYCYCLEptr
+                      00037 ;       Initialize_SETPOINT
+                      00038 ;       Reset_COILTEMPdelay
+                      00039 ;       Initialize_DCBIAS
+                      00040 
+                      00041 ;       Set_LED_delay_count
+                      00042 ;       Initialize_LED_WDT
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE 11
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00043 ;       Initialize_LED_ZeroReading
+                      00044 ;       Initialize_LED_Sensor
+                      00045 ;       Initialize_LED_TooHot
+                      00046 ;       Initialize_LED_RunTime
+                      00047 ;       Initialize_LED_Battery
+                      00048 ;       Initialize_LED_vWait
+                      00049 
+                      00050 ;       Initialize_vSTATE
+                      00051 ;       Initialize_vSENSOR
+                      00052 ;       Initialize_vERROR
+                      00053 ;       Initialize_vCOILTEMP
+                      00054 ;       Initialize_vPWM
+                      00055 ;       Initialize_Start_Time
+                      00056 ;       Initialize_Restart_Time
+                      00057 ;       Clear_eePROM_Buffers
+                      00058 ;
+                      00059 ;       Save_W_STATUS
+                      00060 ;       Restore_W_STATUS
+                      00061 ;
+                      00062 ;       Set_vSTATE (bit), Clear_vSTATE (bit), Wait_vSTATE (bit)
+                      00063 ;       Set_vSENSOR (bit), Clear_vSENSOR (bit), Wait_vSENSOR (bit)
+                      00064 ;       Set_vPWM (bit), Clear_vPWM (bit)
+                      00065 ;       Set_vERROR (bit), Clear_vERROR (bit)
+                      00066 ;       Set_vCOILTEMP (bit), Clear_vCOILTEMP (bit)
+                      00067 
+                      00068 ;       If_Heartbeat_Interrupt "THEN"
+                      00069 ;       Clear_Heartbeat_Interrupt_Flag
+                      00070 ;       Initialize_Heartbeat
+                      00071 ;       Start_Heartbeat
+                      00072 ;       Stop_Heartbeat
+                      00073 
+                      00074 ;       Initialize_Watchdog
+                      00075 ;       If_WDT_Reset_Then_Shutdown
+                      00076 ;       Reset_Watchdog
+                      00077 ;       If_vRun "THEN"
+                      00078 
+                      00079 ;       Read_Button
+                      00080 ;       Wait_Release_BTN (btn#)
+                      00081 ;       Reset_BTNdelay (ticks)
+                      00082 ;       Clear_BTNcount
+                      00083 ;       Increase_SETPOINT (units)
+                      00084 ;       Decrease_SETPOINT (units)
+                      00085 ;       If_BUTTON_Adjust_SETPOINT
+                      00086 
+                      00087 ;       Update_Duty_Cycle
+                      00088 ;       Initialize_COILTEMPptr
+                      00089 ;       Advance_COILTEMPptr
+                      00090 ;       Initialize_eeCOILTEMPptr
+                      00091 ;       Advance_eeCOILTEMPptr
+                      00092 ;       Read_Coil_Temperature
+                      00093 ;       Signal_SETPOINT
+                      00094 
+                      00095 ;       If_Maximum_Run_Time "THEN_GOTO" addr
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE 12
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00096 ;--------------------
+                      00097 
+                      00098 Skip_If_ZERO macro
+                      00099         btfss   ZERO
+                      00100         endm
+                      00101 Skip_If_NOT_ZERO macro
+                      00102         btfsc   ZERO
+                      00103         endm
+                      00104 ;--------------------
+                      00105 Set_CARRY macro
+                      00106         bsf             CARRY
+                      00107         endm
+                      00108 Clear_CARRY macro
+                      00109         bcf             CARRY
+                      00110         endm
+                      00111 Skip_If_CARRY_SET macro
+                      00112         btfss   CARRY
+                      00113         endm
+                      00114 Skip_If_CARRY_CLR macro
+                      00115         btfsc   CARRY
+                      00116         endm
+                      00117 ;--------------------
+                      00118 Skip_If_vRestart macro
+                      00119         btfss   vSTATE,vRestart
+                      00120         endm
+                      00121 Skip_If_NOT_vRestart macro
+                      00122         btfsc   vSTATE,vRestart
+                      00123         endm
+                      00124 ;--------------------
+                      00125 Set_vAbove macro
+                      00126         bsf             vCOILTEMP,vAbove
+                      00127         endm
+                      00128 Clear_vAbove macro
+                      00129         bcf             vCOILTEMP,vAbove
+                      00130         endm
+                      00131 Skip_If_vAbove macro
+                      00132         btfss   vCOILTEMP,vAbove
+                      00133         endm
+                      00134 Skip_If_NOT_vAbove macro
+                      00135         btfsc   vCOILTEMP,vAbove
+                      00136         endm
+                      00137 Skip_If_Old_vAbove macro
+                      00138         btfss   vCOILTEMPold,vAbove
+                      00139         endm
+                      00140 Skip_If_Old_NOT_vAbove macro
+                      00141         btfsc   vCOILTEMPold,vAbove
+                      00142         endm
+                      00143 ;--------------------
+                      00144 Set_vBelow macro
+                      00145         bsf             vCOILTEMP,vBelow
+                      00146         endm
+                      00147 Clear_vBelow macro
+                      00148         bcf             vCOILTEMP,vBelow
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE 13
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00149         endm
+                      00150 Skip_If_vBelow macro
+                      00151         btfss   vCOILTEMP,vBelow
+                      00152         endm
+                      00153 Skip_If_NOT_vBelow macro
+                      00154         btfsc   vCOILTEMP,vBelow
+                      00155         endm
+                      00156 Skip_If_Old_vBelow macro
+                      00157         btfss   vCOILTEMPold,vBelow
+                      00158         endm
+                      00159 Skip_If_Old_NOT_vBelow macro
+                      00160         btfsc   vCOILTEMPold,vBelow
+                      00161         endm
+                      00162 ;--------------------
+                      00163 Set_vInc macro
+                      00164         bsf             vCOILTEMP,vInc
+                      00165         endm
+                      00166 Clear_vInc macro
+                      00167         bcf             vCOILTEMP,vInc
+                      00168         endm
+                      00169 Skip_If_vInc macro
+                      00170         btfss   vCOILTEMP,vInc
+                      00171         endm
+                      00172 Skip_If_Old_vInc macro
+                      00173         btfss   vCOILTEMPold,vInc
+                      00174         endm
+                      00175 Skip_If_NOT_vInc macro
+                      00176         btfsc   vCOILTEMP,vInc
+                      00177         endm
+                      00178 ;--------------------
+                      00179 Set_vDec macro
+                      00180         bsf             vCOILTEMP,vDec
+                      00181         endm
+                      00182 Clear_vDec macro
+                      00183         bcf             vCOILTEMP,vDec
+                      00184         endm
+                      00185 Skip_If_vDec macro
+                      00186         btfss   vCOILTEMP,vDec
+                      00187         endm
+                      00188 Skip_If_Old_vDec macro
+                      00189         btfss   vCOILTEMPold,vDec
+                      00190         endm
+                      00191 Skip_If_NOT_vDec macro
+                      00192         btfsc   vCOILTEMP,vDec
+                      00193         endm
+                      00194 ;--------------------
+                      00195 Set_vAccel macro
+                      00196         bsf             vCOILTEMP,vAccel
+                      00197         endm
+                      00198 Clear_vAccel macro
+                      00199         bcf             vCOILTEMP,vAccel
+                      00200         endm
+                      00201 Skip_If_vAccel macro
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE 14
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00202         btfss   vCOILTEMP,vAccel
+                      00203         endm
+                      00204 Skip_If_Old_vAccel macro
+                      00205         btfss   vCOILTEMPold,vAccel
+                      00206         endm
+                      00207 Skip_If_NOT_vAccel macro
+                      00208         btfsc   vCOILTEMP,vAccel
+                      00209         endm
+                      00210 ;--------------------
+                      00211 Set_vDecel macro
+                      00212         bsf             vCOILTEMP,vDecel
+                      00213         endm
+                      00214 Clear_vDecel macro
+                      00215         bcf             vCOILTEMP,vDecel
+                      00216         endm
+                      00217 Skip_If_vDecel macro
+                      00218         btfss   vCOILTEMP,vDecel
+                      00219         endm
+                      00220 Skip_If_Old_vDecel macro
+                      00221         btfss   vCOILTEMPold,vDecel
+                      00222         endm
+                      00223 ;--------------------
+                      00224 Set_vChgMax macro
+                      00225         bsf             vCOILTEMP,vChgMax
+                      00226         endm
+                      00227 Clear_vChgMax macro
+                      00228         bcf             vCOILTEMP,vChgMax
+                      00229         endm
+                      00230 Skip_If_vChgMax macro
+                      00231         btfss   vCOILTEMP,vChgMax
+                      00232         endm
+                      00233 Skip_If_NOT_vChgMax macro
+                      00234         btfsc   vCOILTEMP,vChgMax
+                      00235         endm
+                      00236 ;--------------------
+                      00237 Clear_vTypeK macro
+                      00238         bcf             vSENSOR,vTypeK
+                      00239         endm
+                      00240 Skip_If_vTypeK macro
+                      00241         btfss   vSENSOR,vTypeK
+                      00242         endm
+                      00243 Skip_If_NOT_vTypeK macro
+                      00244         btfsc   vSENSOR,vTypeK
+                      00245         endm
+                      00246 ;--------------------
+                      00247 Set_BUTTON1 macro
+                      00248         bsf             vSENSOR,vBtn1
+                      00249         endm
+                      00250 Clear_BUTTON1 macro
+                      00251         bcf             vSENSOR,vBtn1
+                      00252         endm
+                      00253 Skip_If_BUTTON1 macro
+                      00254         btfss   vSENSORold,vBtn1
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE 15
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00255         endm
+                      00256 Set_BUTTON2 macro
+                      00257         bsf             vSENSOR,vBtn2
+                      00258         endm
+                      00259 Clear_BUTTON2 macro
+                      00260         bcf             vSENSOR,vBtn2
+                      00261         endm
+                      00262 Skip_If_BUTTON2 macro
+                      00263         btfss   vSENSORold,vBtn2
+                      00264         endm
+                      00265 Set_BUTTON_PRESS macro
+                      00266         bsf             vSENSOR,vBtnON
+                      00267         endm
+                      00268 Clear_BUTTON_PRESS macro
+                      00269         bcf             vSENSOR,vBtnON
+                      00270         endm
+                      00271 ;--------------------
+                      00272 Set_vDCnew macro
+                      00273         bsf             vPWM,vDCnew
+                      00274         endm
+                      00275 Clear_vDCnew macro
+                      00276         bcf             vPWM,vDCnew
+                      00277         endm
+                      00278 Skip_If_vDCnew macro
+                      00279         btfss   vPWM,vDCnew
+                      00280         endm
+                      00281 ;--------------------
+                      00282 Set_vDCzero macro
+                      00283         bsf             vPWM,vDCzero
+                      00284         endm
+                      00285 Clear_vDCzero macro
+                      00286         bcf             vPWM,vDCzero
+                      00287         endm
+                      00288 Skip_If_vDCzero macro
+                      00289         btfss   vPWM,vDCzero
+                      00290         endm
+                      00291 Skip_If_NOT_vDCzero macro
+                      00292         btfsc   vPWM,vDCzero
+                      00293         endm
+                      00294 ;--------------------
+                      00295 Set_vDCmax macro
+                      00296         bsf             vPWM,vDCmax
+                      00297         endm
+                      00298 Clear_vDCmax macro
+                      00299         bcf             vPWM,vDCmax
+                      00300         endm
+                      00301 Skip_If_vDCmax macro
+                      00302         btfss   vPWM,vDCmax
+                      00303         endm
+                      00304 Skip_If_NOT_vDCmax macro
+                      00305         btfsc   vPWM,vDCmax
+                      00306         endm
+                      00307 ;--------------------
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE 16
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00308 Set_vDCsp macro
+                      00309         bsf             vPWM,vDCsp
+                      00310         endm
+                      00311 Clear_vDCsp macro
+                      00312         bcf             vPWM,vDCsp
+                      00313         endm
+                      00314 ;--------------------
+                      00315 Set_vDCsign macro
+                      00316         bsf             vPWM,vDCsign
+                      00317         endm
+                      00318 Clear_vDCsign macro
+                      00319         bcf             vPWM,vDCsign
+                      00320         endm
+                      00321 Skip_If_vDCsign macro
+                      00322         btfss   vPWM,vDCsign
+                      00323         endm
+                      00324 Skip_If_NOT_vDCsign macro
+                      00325         btfsc   vPWM,vDCsign
+                      00326         endm
+                      00327 
+                      00328 ;******************
+                      00329 ;Clear_Counter macro num
+                      00330 ;       movlw   num
+                      00331 ;       call    eeClrCounterW
+                      00332 ;       endm
+                      00333 ;       
+                      00334 ;Increment_Counter macro num
+                      00335 ;       movlw   num
+                      00336 ;       call    eeIncCounterW
+                      00337 ;       endm
+                      00338 ;******************
+                      00339 
+                      00340 ;------------------
+                      00341 Clear_Bytes macro adr, cnt
+                      00342         banksel adr
+                      00343         movlw   cnt
+                      00344          movwf  LOOPcnt
+                      00345         movlw   adr
+                      00346          movwf  FSR
+                      00347 ;loop:
+                      00348         clrf    INDF
+                      00349         incf    FSR
+                      00350         decfsz  LOOPcnt
+                      00351         goto    $-3
+                      00352         endm
+                      00353 
+                      00354 ;------------------
+                      00355 ; Disable all interrupts
+                      00356 Disable_Interrupts macro
+                      00357         call    DisableInterrupts
+                      00358         endm
+                      00359 
+                      00360 ; Enable all interrupts
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE 17
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00361 Enable_Interrupts macro
+                      00362         call    EnableInterrupts
+                      00363         endm
+                      00364 
+                      00365 ; Disable GPIO
+                      00366 Disable_GPIO macro
+                      00367         banksel GPIO
+                      00368         clrf    GPIO            ;set all GPx to '0' level
+                      00369         banksel ANSEL
+                      00370         clrf    ANSEL           ;set digital I/O
+                      00371         banksel TRISIO
+                      00372         movlw   b'00111111'
+                      00373         movwf   TRISIO          ;set pins as input
+                      00374         banksel CMCON0
+                      00375         clrf    CMCON0          ;disable Comparator
+                      00376         endm
+                      00377         
+                      00378 ; Initialize GPIO
+                      00379 Initialize_GPIO macro
+                      00380         banksel GPIO
+                      00381         clrf    GPIO            ;set all GPx output to '0' level
+                      00382 
+                      00383         ;disable comparator
+                      00384         movlw   0x0F            ;only digital I/O on pins
+                      00385         movwf   CMCON0          ;comparator OFF
+                      00386 
+                      00387         ;set analog input on AN1/GP1
+                      00388         banksel ANSEL
+                      00389         clrf    ANSEL           ;set digital I/O
+                      00390         movlw   b'00010010'     ;Fosc/8 & AN1 analog input
+                      00391           movwf ANSEL
+                      00392         ;enable input on GP1, GP3
+                      00393         movlw   b'00001010'     ;- - o o i o i o
+                      00394           movwf TRISIO          ;GP  5 4 3 2 1 0
+                      00395 
+                      00396         ;make sure MAX6675 chip select (CS) is off (HI)
+                      00397         banksel GPIO
+                      00398         bsf             CS                      ;disable CS
+                      00399         endm
+                      00400 
+                      00401 ; Turn ON the LED pin for OUTPUT
+                      00402 Enable_LED macro
+                      00403         banksel TRISIO
+                      00404         bcf             TRISIO, GP0
+                      00405         endm
+                      00406 
+                      00407 ;------------------
+                      00408 ; Initialize the internal oscillator for 4MHz
+                      00409 Initialize_Oscillator macro
+                      00410         banksel OSCCON
+                      00411         movlw   b'01100001'     ;default: internal osc @ 4 MHz
+                      00412         movwf   OSCCON
+                      00413         endm
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE 18
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00414 
+                      00415 ;disable PWM
+                      00416 Disable_PWM macro
+                      00417         banksel GPIO
+                      00418         bcf             PWM                     ;set GP2 to 0
+                      00419         clrf    T2CON           ;stop Timer2
+                      00420         clrf    CCP1CON         ;clear duty cycle 2 LSB
+                      00421         clrf    CCPR1L          ;clear duty cycle 8 MSB
+                      00422 
+                      00423         banksel TRISIO
+                      00424         ;bsf    TRISIO,GP2      ;set GP2 to input
+                      00425         clrf    PR2                     ;set PWM period to zero
+                      00426         endm
+                      00427 
+                      00428 ; Initialize PWM
+                      00429         ;PR2
+                      00430         ;T2CON
+                      00431         ;CCPR1L
+                      00432         ;CCP1CON<5:4> = LSB
+                      00433         ;CCPR1L = MSB
+                      00434         ;frequency = 1000 Hz (1 msec per tick)
+                      00435         ;T2CON<prescaler> = '01' = 1:4                  1000 Hz
+                      00436         ;T2CON<prescaler> = '11' = 1:16                  250 Hz
+                      00437         ;T2CON<postscaler> = '0000' = 1:1
+                      00438         ;PR2 = 249
+                      00439         ;duty register = 0 (0%) to 1000 (100%)
+                      00440         ;duty step = 0.1%
+                      00441 Initialize_PWM macro
+                      00442 ;Setup for PWM Operation from page 82
+                      00443 
+                      00444         ;(1) disable PWM pin - set TRISIO,GP2
+                      00445         banksel TRISIO
+                      00446         bsf     TRISIO,GP2
+                      00447 
+                      00448         ;(2) set PWM period by loading PR2
+                      00449         movlw   .249            ;set TMR2 period
+                      00450         movwf   PR2
+                      00451 
+                      00452         ;(3) configure CCP for PWM by loading CCP1CON
+                      00453         banksel CCP1CON
+                      00454         movlw   b'00001100'     ;load PWM duty cycle LSB='00'
+                      00455         movwf   CCP1CON         ;and configure CCP for PWM
+                      00456 
+                      00457         ;(4) finish setting duty cycle in CCPR1L
+                      00458         clrf    CCPR1L          ;initial duty cycle set to 0
+                      00459 
+                      00460         ;(5) Configure and start Timer2
+                      00461         banksel PIE1
+                      00462         bcf             PIE1,TMR2IE             ;disable Timer2 interrupt
+                      00463 ;       bsf             PIE1,TMR2IE             ;enable Timer2 interrupt
+                      00464         banksel PIR1
+                      00465         bcf             PIR1,TMR2IF             ;clear Timer2 interrupt flag
+                      00466 ;       movlw   b'00000101'             ;-,0000,TMR2 ON, prescaler=1:4  1000 Hz
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE 19
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00467         movlw   b'00000111'             ;-,0000,TMR2 ON, prescaler=1:16  250 Hz
+                      00468         movwf   T2CON                   ;load prescaler value
+                      00469 
+                      00470         ;(6) Enable PWM after new PWM cycle
+                      00471 init_pwm_1:
+                      00472         btfss   PIR1,TMR2IF             ;wait until Timer2 overflows
+                      00473           goto  init_pwm_1
+                      00474         banksel TRISIO
+                      00475         bcf             TRISIO,GP2              ;set GP2 to output (PWM)
+                      00476         endm
+                      00477 
+                      00478 ;------------------
+                      00479 ;initialize PID variables
+                      00480 Initialize_PID macro
+                      00481         banksel SPERROR
+                      00482         Clear_Bytes     cCOILTEMPstart, cCOILTEMPbytes
+                      00483         Clear_Bytes     cSPERRORadr, .9
+                      00484         movlw   cSPERRORcnt             ;reset counter
+                      00485           movwf SPERRORcnt
+                      00486         endm
+                      00487 
+                      00488 ;------------------
+                      00489 ; Initialize eeDUTYCYCLE buffer pointer
+                      00490 Initialize_eeDUTYCYCLEptr macro
+                      00491         banksel eeDUTYCYCLEptr
+                      00492         movlw   eeDUTYCYCLEfirst
+                      00493         movwf   eeDUTYCYCLEptr
+                      00494         endm
+                      00495 
+                      00496 ;advance eeDUTYCYCLE buffer pointer by 2
+                      00497 Advance_eeDUTYCYCLEptr macro
+                      00498         banksel eeDUTYCYCLEptr
+                      00499         incf    eeDUTYCYCLEptr
+                      00500         incf    eeDUTYCYCLEptr
+                      00501         btfsc   eeDUTYCYCLEptr,.7       ;bit clear means buffer wrap
+                      00502           goto  $+3
+                      00503         ;bit clear: wrap eeDUTYCYCLE pointer
+                      00504         movlw   eeDUTYCYCLEfirst        ;first address in buffer
+                      00505         movwf   eeDUTYCYCLEptr
+                      00506         endm
+                      00507 
+                      00508 ;retrieve saved SETPOINT from eePROM
+                      00509 Initialize_SETPOINT macro
+                      00510         call    eeGetSETPOINT
+                      00511         endm
+                      00512 
+                      00513 ;set ticks to next COILTEMP reading
+                      00514 Reset_COILTEMPdelay macro
+                      00515         movlw   .3
+                      00516         movwf   COILTEMPdelay
+                      00517         endm
+                      00518 
+                      00519 ;Get DCBIAS from eePROM (0x007D = 125/1023 = 12.2%)
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE 20
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00520 Initialize_DCBIAS macro
+                      00521         call    eeGetDCBIAS
+                      00522         endm
+                      00523 
+                      00524 ;Get DCBIAS from eePROM (0x007D = 125/1023 = 12.2%)
+                      00525 Initialize_SPERRORtrip macro
+                      00526         call    eeGetSPERRORtrip
+                      00527         endm
+                      00528 
+                      00529 ;==================
+                      00530 ;Set LED to flash 'count' times every 'delay' ticks
+                      00531 Set_LED_delay_count macro delay, count
+                      00532         banksel FLASHdelay0
+                      00533         movlw   delay
+                      00534           movwf FLASHdelay0
+                      00535         movlw   count
+                      00536           movwf FLASHcount0
+                      00537         call ResetLED
+                      00538         endm
+                      00539 
+                      00540 Initialize_LED_WDT macro
+                      00541         Set_LED_delay_count .5, .1
+                      00542         endm
+                      00543 
+                      00544 Initialize_LED_ZeroReading macro
+                      00545         Set_LED_delay_count .5, .2
+                      00546         endm
+                      00547 
+                      00548 Initialize_LED_Sensor macro
+                      00549         Set_LED_delay_count .20, .1
+                      00550         endm
+                      00551 
+                      00552 Initialize_LED_TooHot macro
+                      00553         Set_LED_delay_count .20, .2
+                      00554         endm
+                      00555 
+                      00556 Initialize_LED_RunTime macro
+                      00557         Set_LED_delay_count .20, .3
+                      00558         endm
+                      00559 
+                      00560 Initialize_LED_Battery macro
+                      00561         Set_LED_delay_count .20, .4
+                      00562         endm
+                      00563 
+                      00564 Initialize_LED_vWait macro
+                      00565         Set_LED_delay_count .30, .3
+                      00566         endm
+                      00567 
+                      00568 ;------------------
+                      00569 ;clear the vSTATE byte
+                      00570 Initialize_vSTATE macro
+                      00571         clrf    vSTATE
+                      00572         endm
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE 21
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00573 
+                      00574 ;clear the vSENSOR byte
+                      00575 Initialize_vSENSOR macro
+                      00576         clrf    vSENSOR
+                      00577         endm
+                      00578 
+                      00579 ;clear the vERROR byte
+                      00580 Initialize_vERROR macro
+                      00581         banksel vERROR
+                      00582         clrf    vERROR
+                      00583         endm
+                      00584 
+                      00585 ;clear the vCOILTEMP byte
+                      00586 Initialize_vCOILTEMP macro
+                      00587         clrf    vCOILTEMP
+                      00588         endm
+                      00589 ;clear the vPWM byte
+                      00590 Initialize_vPWM macro
+                      00591         clrf    vPWM
+                      00592         endm
+                      00593 
+                      00594 ;set the ticks until Shutdown
+                      00595 ;set TOKEIT delay
+                      00596 Initialize_Start_Time macro
+                      00597         banksel RUNTIME
+                      00598         movlw   cRUNTIMElo
+                      00599           movwf RUNTIME
+                      00600         movlw   cRUNTIMEhi
+                      00601           movwf RUNTIME+1
+                      00602         movlw   cTOKEITlo                       ;delay before green LED on
+                      00603           movwf TOKEITdelay
+                      00604         movlw   cTOKEIThi
+                      00605           movwf TOKEITdelay+1
+                      00606         endm
+                      00607 
+                      00608 Initialize_Restart_Time macro
+                      00609         banksel RUNTIME
+                      00610         movlw   cEXTRATIMElo
+                      00611           movwf RUNTIME
+                      00612         movlw   cEXTRATIMEhi
+                      00613           movwf RUNTIME+1
+                      00614         clrf    TOKEITdelay                     ;restart
+                      00615         clrf    TOKEITdelay+1
+                      00616         endm
+                      00617 
+                      00618 ;write FFs into eePROM
+                      00619 Clear_eePROM_Buffers macro
+                      00620         call    eeClearCOILTEMPbuffer
+                      00621         call    eeClearDUTYCYCLEbuffer
+                      00622         endm
+                      00623 
+                      00624 ;------------------
+                      00625 ;save W and STATUS on interrupt
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE 22
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00626 Save_W_STATUS macro
+                      00627         movwf   W_save                  ;push W
+                      00628         swapf   STATUS,W                ;move STATUS to W without affecting Z
+                      00629         movwf   STATUS_save             ;push STATUS
+                      00630         endm
+                      00631 
+                      00632 ;restore W and STATUS after interrupt
+                      00633 Restore_W_STATUS macro
+                      00634         swapf   STATUS_save,W   ;pop STATUS register
+                      00635         movwf   STATUS                  ;restore pre-isr STATUS register contents
+                      00636         swapf   W_save                  ;two instructions to pop W from F ...
+                      00637         swapf   W_save,W                ;... without changing STATUS,Z like movf does
+                      00638         endm
+                      00639 
+                      00640 ;===== Vaporizer State Variable =====
+                      00641 
+                      00642 ;set a vSTATE bit
+                      00643 Set_vSTATE macro bit
+                      00644         bsf             vSTATE,bit
+                      00645         endm
+                      00646 
+                      00647 ;clear a vSTATE bit
+                      00648 Clear_vSTATE macro bit
+                      00649         bcf             vSTATE,bit
+                      00650         endm
+                      00651 
+                      00652 Wait_vSTATE macro bit
+                      00653         btfss   vSTATE,bit
+                      00654           goto  $-1
+                      00655         endm
+                      00656 
+                      00657 ;set a vSENSOR bit
+                      00658 Set_vSENSOR macro bit
+                      00659         bsf             vSENSOR,bit
+                      00660         endm
+                      00661 
+                      00662 ;clear a vSENSOR bit
+                      00663 Clear_vSENSOR macro bit
+                      00664         bcf             vSENSOR,bit
+                      00665         endm
+                      00666 
+                      00667 
+                      00668 ;wait for vSENSOR bit
+                      00669 Wait_vSENSOR macro bit
+                      00670         btfss   vSENSOR,bit
+                      00671           goto  $-1
+                      00672         endm
+                      00673 
+                      00674 ;set a vERROR bit
+                      00675 Set_vERROR macro bit
+                      00676         banksel vERROR
+                      00677         bsf             vERROR,bit
+                      00678         endm
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE 23
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00679 
+                      00680 ;clear a vERROR bit
+                      00681 Clear_vERROR macro bit
+                      00682         banksel vERROR
+                      00683         bcf             vERROR,bit
+                      00684         endm
+                      00685 
+                      00686 ;set a vPWM bit
+                      00687 Set_vPWM macro bit
+                      00688         bsf             vPWM,bit
+                      00689         endm
+                      00690 
+                      00691 ;clear a vPWM bit
+                      00692 Clear_vPWM macro bit
+                      00693         bcf             vPWM,bit
+                      00694         endm
+                      00695 
+                      00696 ;set a vCOILTEMP bit
+                      00697 Set_vCOILTEMP macro bit
+                      00698         bsf             vPWM,bit
+                      00699         endm
+                      00700 
+                      00701 ;clear a vCOILTEMP bit
+                      00702 Clear_vCOILTEMP macro bit
+                      00703         bcf             vPWM,bit
+                      00704         endm
+                      00705 
+                      00706 ;===== Heartbeat =====
+                      00707 
+                      00708 ;testing for Heartbeat interrupt (TIMER1)
+                      00709 If_Heartbeat_Interrupt macro THEN
+                      00710         banksel PIR1
+                      00711         btfss   PIR1, TMR1IF
+                      00712           goto  intr_exit
+                      00713         endm
+                      00714 
+                      00715 Clear_Heartbeat_Interrupt_Flag macro
+                      00716         banksel PIR1
+                      00717         bcf             PIR1,TMR1IF
+                      00718         endm
+                      00719 
+                      00720 ;Initialize Heartbeat Timer (Timer1) - 10 ticks per second
+                      00721 ; -, ignore gate, 1:2 prescaler (01), LPosc off, -, Fosc/4, OFF
+                      00722 Initialize_Heartbeat macro
+                      00723         banksel T1CON
+                      00724         movlw   b'00010000'
+                      00725         movwf   T1CON
+                      00726         endm
+                      00727 
+                      00728 ; Stop Heartbeat Ticker
+                      00729 Stop_Heartbeat macro
+                      00730         banksel T1CON
+                      00731         bcf             T1CON,TMR1ON    ;stop Timer1
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE 24
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00732         endm
+                      00733 
+                      00734 ; Start Heartbeat Ticker (reinit counter)
+                      00735 Start_Heartbeat macro
+                      00736         ;stop Timer1 during setup
+                      00737         Stop_Heartbeat
+                      00738 
+                      00739         ;initialize Timer1 counter
+                      00740         banksel TMR1L
+                      00741         movlw   cHeartbeatLO    ;load counter with 15536
+                      00742         movwf   TMR1L
+                      00743         movlw   cHeartbeatHI    ; = overflow in 100.001 msec
+                      00744         movwf   TMR1H
+                      00745 
+                      00746         ;enable interrupt on rollover
+                      00747         banksel PIE1
+                      00748         bsf             PIE1,TMR1IE
+                      00749         bsf             INTCON,PEIE
+                      00750         bsf             INTCON,GIE
+                      00751 
+                      00752         ;start the Timer1
+                      00753         banksel T1CON
+                      00754         bcf             PIR1,TMR1IF             ;clear interrupt flag
+                      00755         bsf             T1CON,TMR1ON    ;start Timer1
+                      00756         endm
+                      00757 
+                      00758 ;===== Watchdog Timer =====
+                      00759 
+                      00760 ; Initialize WatchDog Timer to 4.5 min timeout
+                      00761 ; WDT enabled in CONFIG so it is always running
+                      00762 ;prescaler= 1:128, postscaler= 1:65536
+                      00763 ;timeout = .00003226 * 65536 * 128 = 270.6 sec = 4.5 min
+                      00764 Initialize_Watchdog macro
+                      00765         clrwdt
+                      00766         banksel WDTCON
+                      00767         movlw   cWDT5min_pre    ;1:65536 prescaler
+                      00768         movwf   WDTCON
+                      00769         banksel OPTION_REG
+                      00770         movlw   cWDT5min_post   ;1:128 postscaler
+                      00771         movwf   OPTION_REG
+                      00772         endm
+                      00773 
+                      00774 ;test for WDT reset and SHUT DOWN
+                      00775 If_WDT_Reset_Then_Shutdown macro
+                      00776         btfss   STATUS,NOT_TO   ;~TO = 0 for WDT reset
+                      00777           goto  Error_WDT               ;WDT timed out!!! "Danger Will Robinson"
+                      00778         endm
+                      00779 
+                      00780 ; Reset WatchDog Timer
+                      00781 ; clear wdt and reset postscaler for 256 msec timeout
+                      00782 ; 16msec (1:512 reset value) * 16 = 256 msec
+                      00783 Reset_Watchdog macro
+                      00784         clrwdt                                  ;reset prescaler to 1:512 (16msec default)
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE 25
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00785         banksel OPTION_REG
+                      00786         movlw   cWDT256ms_post  ;set postscaler to 1:16 (256 msec)
+                      00787         movwf   OPTION_REG
+                      00788         endm
+                      00789 
+                      00790 If_vRun macro THEN
+                      00791         btfss   vSTATE,vRun
+                      00792           goto  intr_done
+                      00793         endm
+                      00794 
+                      00795 ;===== Button Press =====
+                      00796 
+                      00797 ;check for button press every tick
+                      00798 Read_Button macro
+                      00799 
+                      00800         call    ReadBTN
+                      00801         call    SetBTNbit
+                      00802         Set_vSENSOR vBtn        ;set ready flag
+                      00803         endm
+                      00804 
+                      00805 ;wait for release of BTN=bit
+                      00806 Wait_Release_BTN macro bit
+                      00807 
+                      00808         ;wait for next button reading (each tick)
+                      00809         Wait_vSENSOR vBtn               ;2 instr
+                      00810         Clear_vSENSOR vBtn              ;1 instr
+                      00811 
+                      00812         ;test for release of BTN=bit
+                      00813         btfsc   vSENSOR,bit             ;1 instr
+                      00814           goto  $-4
+                      00815         endm
+                      00816 
+                      00817 ;reset BTN delay for 'ticks' number of ticks
+                      00818 Reset_BTNdelay macro ticks
+                      00819         movlw   ticks
+                      00820         movwf   BTNdelay
+                      00821         endm
+                      00822 
+                      00823 ;zero BTNcount to count number of ticks for BTN press
+                      00824 Clear_BTNcount macro
+                      00825         banksel BTNcount
+                      00826         clrf    BTNcount                ;prepare to time button press
+                      00827         endm
+                      00828 
+                      00829 ;===== SETPOINT Adjustment =====
+                      00830 
+                      00831 ;increase SETPOINT temperature by "units" 
+                      00832 ;limit to cSPMAXlo,cSPMAXhi
+                      00833 ;update eePROM value
+                      00834 Increase_SETPOINT macro units
+                      00835         banksel SETPOINT
+                      00836         movlw   units
+                      00837         addwf   SETPOINT
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE 26
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00838         Skip_If_CARRY_CLR
+                      00839          incf   SETPOINT+1
+                      00840 
+                      00841         ;test for max value
+                      00842         movf    SETPOINT,W
+                      00843         sublw   cSPMAXlo                ;lo byte
+                      00844         movf    SETPOINT+1,W
+                      00845         Skip_If_CARRY_SET
+                      00846          incfsz SETPOINT+1,W    ;borrow
+                      00847         sublw   cSPMAXhi                ;hi byte
+                      00848         Skip_If_CARRY_CLR               ;C clear = too high
+                      00849           goto  $+5
+                      00850 
+                      00851         ;limit SETPOINT to SETPOINTmax (cSPMAXlo,cSPMAXhi)
+                      00852         movlw   cSPMAXlo
+                      00853           movwf SETPOINT
+                      00854         movlw   cSPMAXhi
+                      00855           movwf SETPOINT+1
+                      00856         endm
+                      00857 
+                      00858 ;decrease SETPOINT temperature by "units"
+                      00859 Decrease_SETPOINT macro units
+                      00860         banksel SETPOINT
+                      00861         movlw   units
+                      00862         subwf   SETPOINT
+                      00863         movlw   .0
+                      00864         Skip_If_CARRY_SET                       ;borrow?
+                      00865          movlw  .1                              ;Yes
+                      00866         subwf   SETPOINT+1
+                      00867 
+                      00868         ;test if SETPOINT < 0
+                      00869         Skip_If_CARRY_CLR
+                      00870           goto  $+3
+                      00871                 clrf    SETPOINT
+                      00872                 clrf    SETPOINT+1
+                      00873         endm
+                      00874 
+                      00875 ;test for button release after press, then adjust SETPOINT
+                      00876 If_BUTTON_Adjust_SETPOINT macro
+                      00877 
+                      00878         ;debounce BTN press
+                      00879         btfss   vSENSOR,vBtnON          ;Is button still pressed?
+                      00880         goto    main_btn_0                      ;No, check history
+                      00881 
+                      00882         ;time BTN1 press
+                      00883         ;if BTN1 > 32 ticks then ...
+                      00884         ;       ... setup for Factory Default reset
+                      00885         goto    run_DC                          ;done, exit BTN processing
+                      00886 
+                      00887         ;check last button press
+                      00888 main_btn_0:
+                      00889         btfss   vSENSORold,vBtnON       ;was button pressed before?
+                      00890         goto    run_DC                          ;No, so exit
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE 27
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00891 
+                      00892         ;if BTN1 press - increase temperature by 5°F
+                      00893 main_btn_1:
+                      00894         Skip_If_BUTTON1
+                      00895           goto  main_btn_2
+                      00896         Increase_SETPOINT cBUTTONinc
+                      00897         goto    main_btn_3
+                      00898 
+                      00899         ;if BTN2 press - decrease temperature by 4°F
+                      00900 main_btn_2:
+                      00901         Skip_If_BUTTON2
+                      00902           goto  run_DC
+                      00903         Decrease_SETPOINT cBUTTONdec
+                      00904         goto    main_btn_3
+                      00905 
+                      00906 ;update SETPOINT in eePROM 
+                      00907 main_btn_3:
+                      00908         btfsc   vSTATE,vRun
+                      00909           call  eePutSETPOINT
+                      00910         goto    run_DC
+                      00911         endm
+                      00912 
+                      00913 ;===== PWM Duty Cycle =====
+                      00914 
+                      00915 ;Update PWM's Duty Cycle 10-bit value
+                      00916 Update_Duty_Cycle macro
+                      00917 
+                      00918         ;only after sensor reading
+                      00919         Skip_If_vTypeK
+                      00920         goto    udc_exit
+                      00921 
+                      00922         ;... continue ...
+                      00923 
+                      00924         ;save old vCOILTEMP (status flags)
+                      00925         movf    vCOILTEMP,W
+                      00926         movwf   vCOILTEMPold
+                      00927 
+                      00928         ;clear sensor ready bit
+                      00929         Clear_vTypeK
+                      00930 
+                      00931         ;set either vAbove or vBelow (or neither at transition)
+                      00932         ;save maximum above error and below error
+                      00933         call    CalcSPERROR
+                      00934 
+                      00935         ;sum the SPERROR
+                      00936         call    CalcSPERRORsum
+                      00937 
+                      00938         ;set either vInc or vDec (or neither at transition)
+                      00939         ;save maximum increasing change
+                      00940         call    CalcSPERRORchg
+                      00941 
+                      00942         ;set either vAccel or vDecel (or neither at transition)
+                      00943         call    CalcSPERRORacc
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE 28
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00944 
+                      00945         ;calculate the DUTYCYCLEsp value based on DCBIAS
+                      00946         call    CalcDCnew
+                      00947 
+                      00948         ;test if DUTYCYCLEnew modified
+                      00949         Skip_If_vDCnew
+                      00950         goto    udc_exit
+                      00951 
+                      00952                 ;write DUTYCYCLEnew to eePROM ring buffer
+                      00953                 call eeSaveDUTYCYCLEnew
+                      00954 
+                      00955                 ;store DUTYCYCLE in PWM registers
+                      00956                 call    PutDCnew
+                      00957 
+                      00958 udc_exit:
+                      00959         endm
+                      00960 
+                      00961 ;===== COILTEMP =====
+                      00962 
+                      00963 ;initialize COILTEMPptr
+                      00964 Initialize_COILTEMPptr macro
+                      00965         movlw   cCOILTEMPstart
+                      00966         movwf   COILTEMPptr
+                      00967         endm
+                      00968 
+                      00969 ;advance COILTEMPptr and wrap at end
+                      00970 ;implements a 16-byte (8 value) ring buffer
+                      00971 Advance_COILTEMPptr macro
+                      00972         movf    COILTEMPptr,W
+                      00973         addlw   .2
+                      00974         andlw   b'00001110'             ;save bottom 4 bits
+                      00975         iorlw   cCOILTEMPstart  ;set top 4 bits
+                      00976         movwf   COILTEMPptr
+                      00977         endm
+                      00978 
+                      00979 ;----------------------
+                      00980 ; Initialize eeCOILTEMP buffer pointer
+                      00981 Initialize_eeCOILTEMPptr macro
+                      00982         banksel eeCOILTEMPptr
+                      00983         movlw   eeCOILTEMPfirst
+                      00984         movwf   eeCOILTEMPptr           ;set point to first byte
+                      00985         endm
+                      00986 
+                      00987 ;Advance eeCOILTEMP buffer pointer by 2, wrap at end
+                      00988 ;use:   0x10 thru 0x7F
+                      00989 Advance_eeCOILTEMPptr macro
+                      00990         banksel eeCOILTEMPptr
+                      00991         incf    eeCOILTEMPptr
+                      00992         incf    eeCOILTEMPptr
+                      00993         btfss   eeCOILTEMPptr,.7        ;bit set = ptr >= 0x80
+                      00994           goto  $+3
+                      00995         ;bit set: wrap eeCOILTEMP buffer pointer
+                      00996         movlw   eeCOILTEMPfirst         ;first address in buffer
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE 29
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00997         movwf   eeCOILTEMPptr
+                      00998         endm
+                      00999 
+                      01000 ;----------------------
+                      01001 ;Read the MAX6675 every 300 msec
+                      01002 ;called from HeartBeat interrupt code
+                      01003 Read_Coil_Temperature macro
+                      01004         decfsz  COILTEMPdelay
+                      01005           goto  intr_done               ;not time to read MAX6675
+                      01006 
+                      01007         ;reset temperature read delay (300 msec)
+                      01008         Reset_COILTEMPdelay
+                      01009 
+                      01010         ;advance COILTEMPptr to next word / wrap to first adr
+                      01011         Advance_COILTEMPptr 
+                      01012 
+                      01013         ;read the MAX6675
+                      01014         call    ReadCOILTEMP    ;store in COILTEMP, COILTEMP+1
+                      01015         ;Note:  FSR is pointing to COILTEMP (lo byte) with new reading
+                      01016 
+                      01017         ;test for missing sensor
+                      01018         btfsc   INDF,vNoSensor          ;test sensor bit
+                      01019           goto  Error_Sensor            ;MISSING SENSOR -- ABORT!
+                      01020 
+                      01021         ;mask and right justify COILTEMP
+                      01022         call    AdjustCOILTEMP          ;FSR points to lo byte
+                      01023 
+                      01024         ;test for too hot i.e. COILTEMP > COILTEMPmax
+                      01025         banksel COILTEMP
+                      01026         movf    COILTEMPptr,W
+                      01027         movwf   FSR                     ;point to low byte
+                      01028         movf    INDF,W          ;W = lo(COILTEMP)
+                      01029         sublw   cCTMAXlo        ;W = lo(COILTEMPmax) - lo(COILTEMP)
+                      01030         incf    FSR                     ;point to hi byte
+                      01031         movf    INDF,W          ;W = hi(COILTEMP)
+                      01032         Skip_If_CARRY_SET       ;C clear if lo(COILTEMP) > lo(COILTEMPmax)
+                      01033          incfsz INDF,W          ;C Clr, do borrow
+                      01034         sublw   cCTMAXhi        ;W = hi(COILTEMPmax) - hi(COILTEMP)
+                      01035         Skip_If_CARRY_SET       ;C clear if hi(COILTEMP) > hi(COILTEMPmax)
+                      01036 
+                      01037                 goto    Error_TooHot    ;TOO HOT -- ABORT!
+                      01038 
+                      01039         ;save MAX6675 reading in EEPROM data array
+                      01040         call    eeSaveCOILTEMP          ;12 msec
+                      01041 
+                      01042         ;test for zero value and skip it
+                      01043         banksel COILTEMP
+                      01044         movf    COILTEMPptr,W
+                      01045         movwf   FSR
+                      01046         movf    INDF,W
+                      01047         incf    FSR
+                      01048         iorwf   INDF,W
+                      01049         Skip_If_NOT_ZERO        ;lo byte = hi byte = 0, abort
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE 30
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      01050 
+                      01051                 goto    Error_ZeroRead  ;ZERO READING -- ABORT!
+                      01052 
+                      01053         ;set flag to signal reading complete
+                      01054         Set_vSENSOR vTypeK
+                      01055         endm
+                      01056 
+                      01057 ;===== SETPOINT management =====
+                      01058 
+                      01059 ;turn on GREEN LED if at or just crossed SETPOINT
+                      01060 Signal_SETPOINT macro
+                      01061         call    SignalSETPOINT
+                      01062         endm
+                      01063 
+                      01064 ;===== Error Checks =====
+                      01065 
+                      01066 If_Maximum_Run_Time macro addr
+                      01067         banksel RUNTIME
+                      01068         decfsz  RUNTIME
+                      01069           goto  $+5
+                      01070         movf    RUNTIME+1
+                      01071         Skip_If_NOT_ZERO
+                      01072         goto    addr
+                      01073         decf    RUNTIME+1
+                      01074         endm
+                      01075 
+                      01076 ;end    *****
+                      00024 
+  00003FFC            00025 config1=        _PWRTE_OFF      & _WDT_ON               & _INTOSCIO
+  00003FDF            00026 config2=        _CPD_OFF        & _CP_OFF               & _MCLRE_OFF
+  000038FF            00027 config3=        _FCMEN_ON       & _IESO_OFF     & _BOD_OFF
+2007   38DC           00028         __CONFIG        config1 & config2 & config3
+                      00029 
+                      00030 ;***** RESET *****
+0000                  00031         ORG             0x0000                  ;reset vector location
+0000   285A           00032         goto    main                    ;go to beginning of program
+                      00033 ;*********************
+                      00034 
+                      00035 ;***** INTERRUPT *****
+0004                  00036         ORG             0x0004                  ;interrupt vector location
+                      00037 ;*********************
+                      00038 
+                      00039         Save_W_STATUS
+0004   00FF               M         movwf   W_save                  ;push W
+0005   0E03               M         swapf   STATUS,W                ;move STATUS to W without affecting Z
+0006   00FE               M         movwf   STATUS_save             ;push STATUS
+                      00040         Disable_Interrupts
+0007   2271               M         call    DisableInterrupts
+                      00041 
+                      00042         If_Heartbeat_Interrupt THEN             ;else, dismiss the interrupt
+0008   1283 1303          M         banksel PIR1
+000A   1C0C               M         btfss   PIR1, TMR1IF
+000B   2854               M           goto  intr_exit
+MPASM  5.14                          MAIN.ASM   3-30-2011  12:35:55         PAGE 31
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00043 
+                      00044                 ;NOTE:  2.66ms for interrupt handler execution
+                      00045 
+                      00046                 Stop_Heartbeat
+000C   1283 1303          M         banksel T1CON
+000E   1010               M         bcf             T1CON,TMR1ON    ;stop Timer1
+                      00047                 Clear_H
